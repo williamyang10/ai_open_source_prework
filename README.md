@@ -14,6 +14,8 @@ Your web client will be a simple HTML and CSS file that you will open directly w
 
 There is a provided 'world.jpg', but you can use any image that is 2048x2048.
 
+![Animation of game demo](./assets/mmorpg.gif)
+
 ## WebSocket Messaging Protocol
 
 ### Connection
