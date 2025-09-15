@@ -22,7 +22,7 @@ There is a provided 'world.jpg', but you can use any image that is 2048x2048.
 
 Establishing a websocket connection with the shared game server will give you the ability to send commands to the server, as well as receive messages that the server broadcasts. For example, the server periodically broadcasts an update on player positions that have moved.
 
-- **URL**: `ws://localhost:8080`
+- **URL**: `wss://codepath-mmorg.onrender.com`
 - **Format**: JSON over WebSocket
 
 ### Message Types
