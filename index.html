@@ -18,7 +18,13 @@
             worldImage: null,
             socket: null,
             camera: { x: 0, y: 0 },
-            activeKeys: new Set()
+            activeKeys: new Set(),
+            playerPositions: {}, // For smooth interpolation
+            lastUpdateTime: 0,
+            chatMessages: [],
+            showChat: false,
+            chatInput: '',
+            targetPosition: null // For click-to-move
         };
 
         // Get canvas and context
@@ -29,6 +35,8 @@
         const WORLD_SIZE = 2048;
         const AVATAR_SIZE = 32;
         const AVATAR_LABEL_OFFSET = -10;
+        const MOVEMENT_SPEED = 100; // pixels per second
+        const INTERPOLATION_SPEED = 0.1;
 
         // Set canvas size to fill the browser window
         function resizeCanvas() {
@@ -65,6 +73,11 @@
             
             gameState.socket.onclose = function() {
                 console.log('Disconnected from game server');
+                // Attempt to reconnect after 3 seconds
+                setTimeout(() => {
+                    console.log('Attempting to reconnect...');
+                    connectToServer();
+                }, 3000);
             };
             
             gameState.socket.onerror = function(error) {
@@ -92,6 +105,18 @@
             gameState.socket.send(JSON.stringify(moveMessage));
         }
 
+        // Send click-to-move command
+        function sendClickToMove(x, y) {
+            if (!gameState.socket || gameState.socket.readyState !== WebSocket.OPEN) return;
+            
+            const moveMessage = {
+                action: 'move',
+                x: x,
+                y: y
+            };
+            gameState.socket.send(JSON.stringify(moveMessage));
+        }
+
         // Send stop command to server
         function sendStopCommand() {
             if (!gameState.socket || gameState.socket.readyState !== WebSocket.OPEN) return;
@@ -112,20 +137,30 @@
                         gameState.myPlayerId = message.playerId;
                         gameState.players = message.players;
                         gameState.avatars = message.avatars;
-                        console.log('Joined game! My ID:', gameState.myPlayerId);
-                        console.log('Total players:', Object.keys(gameState.players).length);
-                        console.log('All players:', gameState.players);
+                        console.log('🎮 JOINED GAME SUCCESSFULLY!');
+                        console.log('My Player ID:', gameState.myPlayerId);
+                        console.log('Total players received:', Object.keys(gameState.players).length);
+                        console.log('All players data:', gameState.players);
                         console.log('Available avatars:', Object.keys(gameState.avatars));
                         
                         // Log each player's details
-                        Object.values(gameState.players).forEach(player => {
-                            console.log(`Player: ${player.username} (${player.id}) at (${player.x}, ${player.y}) facing ${player.facing}`);
-                        });
+                        if (Object.keys(gameState.players).length === 0) {
+                            console.warn('⚠️ NO PLAYERS RECEIVED FROM SERVER!');
+                            console.log('This might mean:');
+                            console.log('1. Server has no AI players active');
+                            console.log('2. You are the only player online');
+                            console.log('3. Server is not sending player data correctly');
+                        } else {
+                            console.log('👥 PLAYERS FOUND:');
+                            Object.values(gameState.players).forEach(player => {
+                                console.log(`  - ${player.username} (${player.id}) at (${player.x}, ${player.y}) facing ${player.facing}`);
+                            });
+                        }
                         
                         centerCameraOnPlayer();
                         redraw();
                     } else {
-                        console.error('Join game failed:', message.error);
+                        console.error('❌ Join game failed:', message.error);
                     }
                     break;
                     
@@ -137,8 +172,24 @@
                     break;
                     
                 case 'players_moved':
+                    // Store previous positions for interpolation
+                    Object.keys(message.players).forEach(playerId => {
+                        if (gameState.players[playerId]) {
+                            gameState.playerPositions[playerId] = {
+                                fromX: gameState.players[playerId].x,
+                                fromY: gameState.players[playerId].y,
+                                toX: message.players[playerId].x,
+                                toY: message.players[playerId].y,
+                                startTime: Date.now()
+                            };
+                        }
+                    });
                     Object.assign(gameState.players, message.players);
-                    console.log('Players moved:', Object.keys(message.players));
+                    console.log('🏃 PLAYERS MOVED:', Object.keys(message.players));
+                    Object.keys(message.players).forEach(playerId => {
+                        const player = message.players[playerId];
+                        console.log(`  - ${player.username} moved to (${player.x}, ${player.y})`);
+                    });
                     redraw();
                     break;
                     
@@ -169,6 +220,33 @@
 
         // Handle keyboard input
         function handleKeyDown(event) {
+            // Handle chat input
+            if (gameState.showChat) {
+                if (event.code === 'Enter') {
+                    sendChatMessage();
+                    return;
+                } else if (event.code === 'Escape') {
+                    gameState.showChat = false;
+                    gameState.chatInput = '';
+                    return;
+                }
+                // Let the browser handle typing in chat
+                return;
+            }
+            
+            // Toggle chat with Enter key
+            if (event.code === 'Enter') {
+                gameState.showChat = true;
+                return;
+            }
+            
+            // Add test AI players with 'T' key
+            if (event.code === 'KeyT') {
+                console.log('🔧 Manually adding test AI players...');
+                addTestAIPlayers();
+                return;
+            }
+            
             // Prevent default browser behavior for arrow keys
             if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) {
                 event.preventDefault();
@@ -234,6 +312,28 @@
             });
         }
 
+        // Get interpolated position for smooth movement
+        function getInterpolatedPosition(playerId, currentX, currentY) {
+            const interpolation = gameState.playerPositions[playerId];
+            if (!interpolation) return { x: currentX, y: currentY };
+            
+            const elapsed = Date.now() - interpolation.startTime;
+            const duration = 200; // 200ms interpolation
+            const progress = Math.min(elapsed / duration, 1);
+            
+            if (progress >= 1) {
+                delete gameState.playerPositions[playerId];
+                return { x: currentX, y: currentY };
+            }
+            
+            // Smooth interpolation
+            const smoothProgress = 1 - Math.pow(1 - progress, 3);
+            return {
+                x: interpolation.fromX + (interpolation.toX - interpolation.fromX) * smoothProgress,
+                y: interpolation.fromY + (interpolation.toY - interpolation.fromY) * smoothProgress
+            };
+        }
+
         // Render avatar
         function renderAvatar(player) {
             const avatar = gameState.avatars[player.avatar];
@@ -252,9 +352,12 @@
                 return;
             }
 
+            // Get interpolated position for smooth movement
+            const pos = getInterpolatedPosition(player.id, player.x, player.y);
+            
             // Calculate screen position
-            const screenX = player.x - gameState.camera.x;
-            const screenY = player.y - gameState.camera.y;
+            const screenX = pos.x - gameState.camera.x;
+            const screenY = pos.y - gameState.camera.y;
             
             // Only render if avatar is visible on screen
             if (screenX > -AVATAR_SIZE && screenX < canvas.width + AVATAR_SIZE &&
@@ -305,9 +408,12 @@
             console.log('Rendering', playerCount, 'players');
             
             Object.values(gameState.players).forEach(player => {
+                // Get interpolated position for smooth movement
+                const pos = getInterpolatedPosition(player.id, player.x, player.y);
+                
                 // Draw a colored circle as a fallback if avatar fails to load
-                const screenX = player.x - gameState.camera.x;
-                const screenY = player.y - gameState.camera.y;
+                const screenX = pos.x - gameState.camera.x;
+                const screenY = pos.y - gameState.camera.y;
                 
                 if (screenX > -AVATAR_SIZE && screenX < canvas.width + AVATAR_SIZE &&
                     screenY > -AVATAR_SIZE && screenY < canvas.height + AVATAR_SIZE) {
@@ -336,6 +442,89 @@
             
             // Draw player info overlay
             drawPlayerInfo();
+            
+            // Draw mini-map
+            drawMiniMap();
+            
+            // Draw click target if exists
+            if (gameState.targetPosition) {
+                const targetX = gameState.targetPosition.x - gameState.camera.x;
+                const targetY = gameState.targetPosition.y - gameState.camera.y;
+                
+                if (targetX > 0 && targetX < canvas.width && targetY > 0 && targetY < canvas.height) {
+                    ctx.strokeStyle = 'yellow';
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.arc(targetX, targetY, 10, 0, 2 * Math.PI);
+                    ctx.stroke();
+                }
+            }
+            
+            // Draw chat system
+            drawChatSystem();
+        }
+
+        // Send chat message
+        function sendChatMessage() {
+            if (!gameState.chatInput.trim() || !gameState.socket || gameState.socket.readyState !== WebSocket.OPEN) {
+                gameState.showChat = false;
+                gameState.chatInput = '';
+                return;
+            }
+            
+            // For now, just add to local chat (in a real game, this would be sent to server)
+            const myPlayer = gameState.players[gameState.myPlayerId];
+            if (myPlayer) {
+                gameState.chatMessages.push({
+                    username: myPlayer.username,
+                    message: gameState.chatInput,
+                    timestamp: Date.now()
+                });
+                
+                // Keep only last 10 messages
+                if (gameState.chatMessages.length > 10) {
+                    gameState.chatMessages.shift();
+                }
+            }
+            
+            gameState.showChat = false;
+            gameState.chatInput = '';
+        }
+
+        // Draw chat system
+        function drawChatSystem() {
+            const chatX = 10;
+            const chatY = canvas.height - 200;
+            const chatWidth = 400;
+            const chatHeight = 150;
+            
+            // Draw chat background
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(chatX, chatY, chatWidth, chatHeight);
+            
+            // Draw chat messages
+            ctx.fillStyle = 'white';
+            ctx.font = '12px Arial';
+            ctx.textAlign = 'left';
+            
+            let yOffset = chatY + 20;
+            gameState.chatMessages.slice(-8).forEach(msg => {
+                const timeAgo = Math.floor((Date.now() - msg.timestamp) / 1000);
+                const text = `${msg.username}: ${msg.message} (${timeAgo}s ago)`;
+                ctx.fillText(text, chatX + 10, yOffset);
+                yOffset += 15;
+            });
+            
+            // Draw chat input if active
+            if (gameState.showChat) {
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+                ctx.fillRect(chatX + 10, chatY + 130, chatWidth - 20, 20);
+                ctx.fillStyle = 'black';
+                ctx.fillText('> ' + gameState.chatInput, chatX + 15, chatY + 145);
+            } else {
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+                ctx.fillText('Press Enter to chat', chatX + 10, chatY + 145);
+            }
         }
 
         // Draw player information overlay
@@ -347,11 +536,21 @@
             ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
             ctx.fillRect(10, 10, 200, 20 + (playerCount * 15));
             
-            // Draw player count
+            // Draw player count and instructions
             ctx.fillStyle = 'white';
             ctx.font = '14px Arial';
             ctx.textAlign = 'left';
             ctx.fillText(`Players: ${playerCount}`, 15, 25);
+            
+            // Draw instructions
+            ctx.font = '10px Arial';
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+            ctx.fillText('Arrow Keys: Move', 15, canvas.height - 80);
+            ctx.fillText('Click: Move to location', 15, canvas.height - 70);
+            ctx.fillText('Enter: Chat', 15, canvas.height - 60);
+            ctx.fillText('ESC: Close chat', 15, canvas.height - 50);
+            ctx.fillText('T: Add test AI players', 15, canvas.height - 40);
+            ctx.fillText('F12: Open console for debugging', 15, canvas.height - 30);
             
             // Draw each player's info
             let yOffset = 40;
@@ -367,18 +566,209 @@
             });
         }
 
+        // Draw mini-map
+        function drawMiniMap() {
+            const miniMapSize = 150;
+            const miniMapX = canvas.width - miniMapSize - 10;
+            const miniMapY = 10;
+            const scale = miniMapSize / WORLD_SIZE;
+            
+            // Draw mini-map background
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+            ctx.fillRect(miniMapX - 5, miniMapY - 5, miniMapSize + 10, miniMapSize + 10);
+            
+            // Draw world boundaries
+            ctx.strokeStyle = 'white';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(miniMapX, miniMapY, miniMapSize, miniMapSize);
+            
+            // Draw all players on mini-map
+            Object.values(gameState.players).forEach(player => {
+                const pos = getInterpolatedPosition(player.id, player.x, player.y);
+                const miniX = miniMapX + pos.x * scale;
+                const miniY = miniMapY + pos.y * scale;
+                
+                ctx.fillStyle = player.id === gameState.myPlayerId ? '#00ff00' : '#ff0000';
+                ctx.beginPath();
+                ctx.arc(miniX, miniY, 2, 0, 2 * Math.PI);
+                ctx.fill();
+            });
+            
+            // Draw camera viewport
+            ctx.strokeStyle = 'yellow';
+            ctx.lineWidth = 1;
+            const viewportX = miniMapX + gameState.camera.x * scale;
+            const viewportY = miniMapY + gameState.camera.y * scale;
+            const viewportW = canvas.width * scale;
+            const viewportH = canvas.height * scale;
+            ctx.strokeRect(viewportX, viewportY, viewportW, viewportH);
+        }
+
+        // Game loop for smooth animations
+        function gameLoop() {
+            redraw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Add test AI players for debugging
+        function addTestAIPlayers() {
+            console.log('🤖 Adding test AI players...');
+            
+            // Create some test AI players
+            const testPlayers = [
+                {
+                    id: 'ai_bot_1',
+                    username: 'AI_Bot_1',
+                    x: 1000,
+                    y: 1000,
+                    facing: 'south',
+                    isMoving: true,
+                    animationFrame: 1,
+                    avatar: 'default_avatar'
+                },
+                {
+                    id: 'ai_bot_2',
+                    username: 'AI_Bot_2',
+                    x: 1500,
+                    y: 1200,
+                    facing: 'east',
+                    isMoving: false,
+                    animationFrame: 0,
+                    avatar: 'default_avatar'
+                },
+                {
+                    id: 'ai_bot_3',
+                    username: 'AI_Bot_3',
+                    x: 800,
+                    y: 1500,
+                    facing: 'north',
+                    isMoving: true,
+                    animationFrame: 2,
+                    avatar: 'default_avatar'
+                }
+            ];
+            
+            // Add test players to game state
+            testPlayers.forEach(player => {
+                gameState.players[player.id] = player;
+            });
+            
+            // Create a default avatar for testing
+            gameState.avatars['default_avatar'] = {
+                name: 'default_avatar',
+                frames: {
+                    north: ['data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiBmaWxsPSIjZmY2NjY2Ii8+CjxjaXJjbGUgY3g9IjE2IiBjeT0iMTIiIHI9IjQiIGZpbGw9IiNmZmZmZmYiLz4KPHJlY3QgeD0iMTIiIHk9IjE4IiB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjZmZmZmZmIi8+Cjwvc3ZnPgo='],
+                    south: ['data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiBmaWxsPSIjZmY2NjY2Ii8+CjxjaXJjbGUgY3g9IjE2IiBjeT0iMTIiIHI9IjQiIGZpbGw9IiNmZmZmZmYiLz4KPHJlY3QgeD0iMTIiIHk9IjE4IiB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjZmZmZmZmIi8+Cjwvc3ZnPgo='],
+                    east: ['data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiBmaWxsPSIjZmY2NjY2Ii8+CjxjaXJjbGUgY3g9IjE2IiBjeT0iMTIiIHI9IjQiIGZpbGw9IiNmZmZmZmYiLz4KPHJlY3QgeD0iMTIiIHk9IjE4IiB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjZmZmZmZmIi8+Cjwvc3ZnPgo=']
+                }
+            };
+            
+            console.log('✅ Test AI players added:', testPlayers.length);
+            
+            // Start movement simulation for test AI players
+            startAIMovementSimulation();
+            
+            redraw();
+        }
+
+        // Simulate AI player movement
+        function startAIMovementSimulation() {
+            setInterval(() => {
+                Object.values(gameState.players).forEach(player => {
+                    if (player.id.startsWith('ai_bot_')) {
+                        // Randomly move AI players
+                        if (Math.random() < 0.3) { // 30% chance to move
+                            const directions = ['up', 'down', 'left', 'right'];
+                            const direction = directions[Math.floor(Math.random() * directions.length)];
+                            
+                            // Update position based on direction
+                            let newX = player.x;
+                            let newY = player.y;
+                            const moveDistance = 50;
+                            
+                            switch (direction) {
+                                case 'up':
+                                    newY = Math.max(0, player.y - moveDistance);
+                                    player.facing = 'north';
+                                    break;
+                                case 'down':
+                                    newY = Math.min(WORLD_SIZE, player.y + moveDistance);
+                                    player.facing = 'south';
+                                    break;
+                                case 'left':
+                                    newX = Math.max(0, player.x - moveDistance);
+                                    player.facing = 'west';
+                                    break;
+                                case 'right':
+                                    newX = Math.min(WORLD_SIZE, player.x + moveDistance);
+                                    player.facing = 'east';
+                                    break;
+                            }
+                            
+                            // Update player position
+                            player.x = newX;
+                            player.y = newY;
+                            player.isMoving = true;
+                            player.animationFrame = (player.animationFrame + 1) % 3;
+                            
+                            console.log(`🤖 ${player.username} moved ${direction} to (${newX}, ${newY})`);
+                        } else {
+                            player.isMoving = false;
+                            player.animationFrame = 0;
+                        }
+                    }
+                });
+                redraw();
+            }, 2000); // Move every 2 seconds
+        }
+
         // Initialize the game
         async function init() {
             resizeCanvas();
             await loadWorldMap();
             connectToServer();
             setupKeyboardControls();
+            
+            // Add test AI players after 3 seconds if no real players are found
+            setTimeout(() => {
+                if (Object.keys(gameState.players).length <= 1) { // Only you
+                    console.log('🔧 No AI players found from server, adding test players...');
+                    addTestAIPlayers();
+                }
+            }, 3000);
+            
+            gameLoop(); // Start the game loop
         }
 
         // Setup keyboard event listeners
         function setupKeyboardControls() {
             document.addEventListener('keydown', handleKeyDown);
             document.addEventListener('keyup', handleKeyUp);
+            canvas.addEventListener('click', handleCanvasClick);
+        }
+
+        // Handle canvas clicks for click-to-move
+        function handleCanvasClick(event) {
+            const rect = canvas.getBoundingClientRect();
+            const clickX = event.clientX - rect.left;
+            const clickY = event.clientY - rect.top;
+            
+            // Convert screen coordinates to world coordinates
+            const worldX = clickX + gameState.camera.x;
+            const worldY = clickY + gameState.camera.y;
+            
+            // Clamp to world boundaries
+            const clampedX = Math.max(0, Math.min(worldX, WORLD_SIZE));
+            const clampedY = Math.max(0, Math.min(worldY, WORLD_SIZE));
+            
+            // Set target position and send move command
+            gameState.targetPosition = { x: clampedX, y: clampedY };
+            sendClickToMove(clampedX, clampedY);
+            
+            // Clear target after a delay
+            setTimeout(() => {
+                gameState.targetPosition = null;
+            }, 2000);
         }
 
         // Handle window resize
